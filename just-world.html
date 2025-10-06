@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mic → Pitch Tracker → 5-Ratio Oscillator Bank</title>
+<style>
+  :root { --bg:#0c0f14; --panel:#151a22; --ink:#e9eef7; --muted:#9aa4b5; --accent:#9a7bff; }
+  *{box-sizing:border-box;font:500 16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  body{margin:0;background:var(--bg);color:var(--ink);padding:24px}
+  .wrap{max-width:900px;margin:auto;display:grid;gap:18px}
+  .card{background:var(--panel);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:18px}
+  h1{margin:0 0 6px;font-size:22px}
+  button{cursor:pointer;border:0;border-radius:12px;padding:10px 14px;background:var(--accent);color:#0b0620;font-weight:700}
+  .row{display:grid;grid-template-columns:180px 1fr auto;gap:10px;align-items:center;margin:8px 0}
+  input[type=range]{width:100%}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+  .grid{display:grid;gap:10px}
+  .freqs{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .pill{padding:8px 10px;border-radius:10px;background:#0e1320;color:var(--muted)}
+  .tiny{font-size:12px;color:var(--muted)}
+</style>
+
+<div class="wrap">
+  <div class="card">
+    <h1>Mic → Pitch → 5 Tuned Oscillators</h1>
+    <p class="tiny">Ratios: 9/8, 5/4, 4/3, 25/8, 2/1. Gate closes when input below threshold.</p>
+    <div class="grid">
+      <div class="row">
+        <span>Transport</span>
+        <div>
+          <button id="start">Start</button>
+          <button id="stop" disabled>Stop</button>
+        </div>
+        <span id="status" class="pill">idle</span>
+      </div>
+
+      <div class="row">
+        <label for="gain">Master Gain</label>
+        <input id="gain" type="range" min="0" max="1" step="0.001" value="0.3" />
+        <span class="mono" id="gainVal">0.30</span>
+      </div>
+
+      <div class="row">
+        <label for="smooth">Pitch Smoothing (EMA)</label>
+        <input id="smooth" type="range" min="0" max="0.99" step="0.01" value="0.6" />
+        <span class="mono" id="smoothVal">0.60</span>
+      </div>
+
+      <div class="row">
+        <label for="gate">Gate Threshold (RMS)</label>
+        <input id="gate" type="range" min="0.001" max="0.2" step="0.001" value="0.02" />
+        <span class="mono" id="gateVal">0.020</span>
+      </div>
+
+      <div class="row">
+        <label for="attack">Gate Attack (ms)</label>
+        <input id="attack" type="range" min="0" max="200" step="1" value="30" />
+        <span class="mono" id="attackVal">30</span>
+      </div>
+
+      <div class="row">
+        <label for="release">Gate Release (ms)</label>
+        <input id="release" type="range" min="0" max="1000" step="5" value="250" />
+        <span class="mono" id="releaseVal">250</span>
+      </div>
+
+      <div class="card">
+        <div>Tracked base frequency: <span class="mono" id="baseHz">—</span> Hz</div>
+        <div class="freqs tiny">
+          <div>9/8: <span class="mono" id="f1">—</span></div>
+          <div>5/4: <span class="mono" id="f2">—</span></div>
+          <div>4/3: <span class="mono" id="f3">—</span></div>
+          <div>25/8: <span class="mono" id="f4">—</span></div>
+          <div>2/1: <span class="mono" id="f5">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fmt = (n, d=2) => isFinite(n) ? Number(n).toFixed(d) : "—";
+
+  const ratios = [9/8, 5/4, 4/3, 25/8, 2/1];
+
+  let ctx, micNode, analyser, scriptTimer;
+  let master, gateGain, oscillators = [], oscGains = [];
+  let started = false;
+
+  // Gate state
+  let gateOpen = false, gateTarget = 0;
+  function setGate(open, now) {
+    gateTarget = open ? 1 : 0;
+    const a = Number($('attack').value)/1000;
+    const r = Number($('release').value)/1000;
+    gateGain.gain.cancelScheduledValues(now);
+    gateGain.gain.setValueAtTime(gateGain.gain.value, now);
+    gateGain.gain.linearRampToValueAtTime(gateTarget, now + (open ? a : r));
+    gateOpen = open;
+  }
+
+  // Autocorrelation pitch detection
+  function detectPitchACF(buf, sampleRate) {
+    const size = buf.length;
+    let rms = 0;
+    for (let i=0;i<size;i++) rms += buf[i]*buf[i];
+    rms = Math.sqrt(rms/size);
+
+    const thr = Number($('gate').value);
+    if (rms < thr) return { freq: 0, rms };
+
+    const corr = new Float32Array(size);
+    for (let lag=0; lag<size; lag++) {
+      let sum = 0;
+      for (let i=0; i<size-lag; i++) sum += buf[i]*buf[i+lag];
+      corr[lag] = sum;
+    }
+
+    let d = 0; while (d < size-1 && corr[d] > corr[d+1]) d++;
+    let peak = -1, peakLag = -1;
+    for (let i=d; i<size-1; i++) {
+      if (corr[i] > peak) { peak = corr[i]; peakLag = i; }
+    }
+    if (peakLag <= 0) return { freq: 0, rms };
+
+    const x1 = peakLag-1, x2 = peakLag, x3 = peakLag+1;
+    if (x3 >= size) return { freq: sampleRate/peakLag, rms };
+    const y1 = corr[x1], y2 = corr[x2], y3 = corr[x3];
+    const denom = (y1 - 2*y2 + y3);
+    const shift = denom ? 0.5*(y1 - y3)/denom : 0;
+    const lag = peakLag + shift;
+
+    const freq = sampleRate / lag;
+    return { freq, rms };
+  }
+
+  // Simple EMA smoother
+  let smoothHz = 0;
+  function smooth(value) {
+    const alpha = Number($('smooth').value);
+    if (!isFinite(smoothHz) || smoothHz === 0) smoothHz = value;
+    smoothHz = alpha * smoothHz + (1 - alpha) * value;
+    return smoothHz;
+  }
+
+  function updateUI(base, freqs) {
+    $('baseHz').textContent = fmt(base, 2);
+    ['f1','f2','f3','f4','f5'].forEach((id, i) => $(id).textContent = fmt(freqs[i], 2));
+  }
+
+  async function start() {
+    if (started) return;
+    started = true;
+    $('status').textContent = 'starting…';
+    $('start').disabled = true; $('stop').disabled = false;
+
+    ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+    micNode = ctx.createMediaStreamSource(stream);
+
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.0;
+
+    master = ctx.createGain();
+    master.gain.value = Number($('gain').value);
+
+    gateGain = ctx.createGain();
+    gateGain.gain.value = 0; // closed initially
+
+    for (let i=0;i<5;i++) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      const g = ctx.createGain();
+      g.gain.value = 0.2;
+      osc.connect(g).connect(gateGain);
+      osc.start();
+      oscillators.push(osc);
+      oscGains.push(g);
+    }
+
+    gateGain.connect(master).connect(ctx.destination);
+    micNode.connect(analyser);
+
+    const buf = new Float32Array(analyser.fftSize);
+
+    $('status').textContent = 'running';
+
+    function tick() {
+      analyser.getFloatTimeDomainData(buf);
+      const { freq, rms } = detectPitchACF(buf, ctx.sampleRate);
+
+      const open = rms >= Number($('gate').value);
+      if (open !== gateOpen) setGate(open, ctx.currentTime);
+
+      let base = freq;
+      if (freq <= 0 || !isFinite(freq)) base = 0;
+      else base = smooth(freq);
+
+      const freqs = ratios.map(r => base * r);
+
+      if (base > 0) {
+        oscillators.forEach((osc, i) => {
+          const f = Math.max(10, Math.min(20000, freqs[i]));
+          try {
+            osc.frequency.setTargetAtTime(f, ctx.currentTime, 0.02);
+          } catch (e) {
+            osc.frequency.value = f;
+          }
+        });
+      }
+
+      updateUI(base || 0, freqs.map(f => base>0 ? f : NaN));
+      scriptTimer = requestAnimationFrame(tick);
+    }
+    tick();
+  }
+
+  function stop() {
+    if (!started) return;
+    started = false;
+    $('start').disabled = false; $('stop').disabled = true;
+    $('status').textContent = 'stopped';
+    cancelAnimationFrame(scriptTimer);
+    try { gateGain.disconnect(); master.disconnect(); micNode.disconnect(); } catch (e) {}
+    try { oscillators.forEach(o => o.stop()); } catch (e) {}
+    oscillators = []; oscGains = [];
+    if (ctx && ctx.state !== 'closed') ctx.close();
+  }
+
+  $('start').onclick = start;
+  $('stop').onclick = stop;
+
+  $('gain').oninput = e => { if (master) master.gain.value = Number(e.target.value); $('gainVal').textContent = Number(e.target.value).toFixed(2); };
+  $('smooth').oninput = e => { $('smoothVal').textContent = Number(e.target.value).toFixed(2); };
+  $('gate').oninput = e => { $('gateVal').textContent = Number(e.target.value).toFixed(3); };
+  $('attack').oninput = e => { $('attackVal').textContent = e.target.value; };
+  $('release').oninput = e => { $('releaseVal').textContent = e.target.value; };
+
+  document.addEventListener('click', () => { if (ctx && ctx.state === 'suspended') ctx.resume(); }, { once:false });
+})();
+</script>
+</html>
