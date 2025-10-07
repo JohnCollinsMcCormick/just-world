@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Just World — Mic→Pitch→5-Ratio Bank (Pan/Level + Gate Release Fix)</title>
+<style>
+  :root { --bg:#0c0f14; --panel:#141926; --ink:#e9eef7; --muted:#9aa4b5; --accent:#9a7bff; --warn:#ffb86b; --bad:#ff6b6b; }
+  *{box-sizing:border-box;font:500 16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  body{margin:0;background:var(--bg);color:var(--ink);padding:22px}
+  .wrap{max-width:1100px;margin:auto;display:grid;gap:16px}
+  .grid{display:grid;gap:12px}
+  .cols{display:grid;gap:12px}
+  @media(min-width:980px){.cols{grid-template-columns:1.1fr 1fr}}
+  .card{background:var(--panel);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px}
+  h1{margin:0 0 6px;font-size:22px}
+  h2{margin:0 0 8px;font-size:18px;color:var(--muted)}
+  button{cursor:pointer;border:0;border-radius:12px;padding:10px 14px;background:var(--accent);color:#0b0620;font-weight:700}
+  button.ghost{background:transparent;border:1px solid rgba(255,255,255,.2);color:var(--ink)}
+  .row{display:grid;grid-template-columns:200px 1fr auto;gap:10px;align-items:center}
+  .smallrow{display:grid;grid-template-columns:120px 1fr auto;gap:10px;align-items:center}
+  input[type=range]{width:100%}
+  input[type=number]{width:110px;background:#0e1320;border:1px solid rgba(255,255,255,.12);border-radius:8px;color:var(--ink);padding:6px 8px}
+  label{color:var(--ink)}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+  .tiny{font-size:12px;color:var(--muted)}
+  .grid-5{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .vcard{background:#0f1422;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px}
+  .warn{color:var(--bad)}
+  .vu{height:6px;background:#0a0f19;border-radius:6px;border:1px solid rgba(255,255,255,.06);overflow:hidden}
+  .bar{height:100%;width:0%}
+</style>
+
+<div class="wrap">
+  <div class="card">
+    <h1>Just World — Mic → Pitch → 5 Tuned Oscillators</h1>
+    <div class="grid">
+      <div class="row">
+        <span>Transport</span>
+        <div>
+          <button id="start">Start</button>
+          <button id="stop" class="ghost" disabled>Stop</button>
+        </div>
+        <span id="status" class="mono tiny">idle</span>
+      </div>
+      <div class="row">
+        <label for="gain">Master Gain</label>
+        <input id="gain" type="range" min="0" max="1" step="0.001" value="0.3" />
+        <span class="mono" id="gainVal">0.30</span>
+      </div>
+      <div class="row">
+        <label for="smooth">Pitch Smoothing (EMA)</label>
+        <input id="smooth" type="range" min="0" max="0.99" step="0.01" value="0.6" />
+        <span class="mono" id="smoothVal">0.60</span>
+      </div>
+      <div class="row">
+        <label for="gate">Gate Threshold (RMS)</label>
+        <input id="gate" type="range" min="0.001" max="0.2" step="0.001" value="0.02" />
+        <span class="mono" id="gateVal">0.020</span>
+      </div>
+      <div class="row">
+        <label for="attack">Gate Attack (ms)</label>
+        <input id="attack" type="range" min="0" max="200" step="1" value="25" />
+        <span class="mono" id="attackVal">25</span>
+      </div>
+      <div class="row">
+        <label for="release">Gate Release (ms)</label>
+        <input id="release" type="range" min="0" max="1000" step="5" value="220" />
+        <span class="mono" id="releaseVal">220</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Pitch & Tuning</h2>
+    <div class="grid">
+      <div class="row">
+        <label for="transpose">Transpose (semitones)</label>
+        <input id="transpose" type="range" min="-24" max="24" step="1" value="0">
+        <span class="mono" id="transposeVal">0</span>
+      </div>
+      <div class="row">
+        <label for="octClamp">Clamp Base Octave</label>
+        <select id="octClamp">
+          <option value="none" selected>none</option>
+          <option value="low">~100–400 Hz</option>
+          <option value="mid">~200–800 Hz</option>
+          <option value="hi">~400–1600 Hz</option>
+        </select>
+        <span class="tiny">Keeps base in range by doubling/halving.</span>
+      </div>
+      <div class="row">
+        <label>Hold Last Detected Pitch</label>
+        <input id="hold" type="checkbox" checked>
+        <span class="tiny">If tracking drops, keep last good base so voices continue.</span>
+      </div>
+      <div class="tiny">Base: <span class="mono" id="baseHz">—</span> Hz <span id="nofreq" class="warn"></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Voices</h2>
+    <div class="grid-5">
+      <div class="vcard">
+        <div class="tiny">Ratio 1</div>
+        <input id="r1" type="number" step="0.001" value="1.125">
+        <div class="smallrow"><label>Pan</label><input id="pan1" type="range" min="-1" max="1" step="0.01" value="-0.8"><span class="mono" id="pan1v">-0.80</span></div>
+        <div class="smallrow"><label>Level</label><input id="lvl1" type="range" min="0" max="1" step="0.01" value="0.25"><span class="mono" id="lvl1v">0.25</span></div>
+        <label class="tiny"><input id="m1" type="checkbox"> Mute</label>
+        <div class="vu"><div id="vu1" class="bar" style="background:#6ee7ff"></div></div>
+      </div>
+      <div class="vcard">
+        <div class="tiny">Ratio 2</div>
+        <input id="r2" type="number" step="0.001" value="1.25">
+        <div class="smallrow"><label>Pan</label><input id="pan2" type="range" min="-1" max="1" step="0.01" value="-0.4"><span class="mono" id="pan2v">-0.40</span></div>
+        <div class="smallrow"><label>Level</label><input id="lvl2" type="range" min="0" max="1" step="0.01" value="0.22"><span class="mono" id="lvl2v">0.22</span></div>
+        <label class="tiny"><input id="m2" type="checkbox"> Mute</label>
+        <div class="vu"><div id="vu2" class="bar" style="background:#86efac"></div></div>
+      </div>
+      <div class="vcard">
+        <div class="tiny">Ratio 3</div>
+        <input id="r3" type="number" step="0.001" value="1.333">
+        <div class="smallrow"><label>Pan</label><input id="pan3" type="range" min="-1" max="1" step="0.01" value="0"><span class="mono" id="pan3v">0.00</span></div>
+        <div class="smallrow"><label>Level</label><input id="lvl3" type="range" min="0" max="1" step="0.01" value="0.20"><span class="mono" id="lvl3v">0.20</span></div>
+        <label class="tiny"><input id="m3" type="checkbox"> Mute</label>
+        <div class="vu"><div id="vu3" class="bar" style="background:#c4b5fd"></div></div>
+      </div>
+      <div class="vcard">
+        <div class="tiny">Ratio 4</div>
+        <input id="r4" type="number" step="0.001" value="3.125">
+        <div class="smallrow"><label>Pan</label><input id="pan4" type="range" min="-1" max="1" step="0.01" value="0.4"><span class="mono" id="pan4v">0.40</span></div>
+        <div class="smallrow"><label>Level</label><input id="lvl4" type="range" min="0" max="1" step="0.01" value="0.18"><span class="mono" id="lvl4v">0.18</span></div>
+        <label class="tiny"><input id="m4" type="checkbox"> Mute</label>
+        <div class="vu"><div id="vu4" class="bar" style="background:#fca5a5"></div></div>
+      </div>
+      <div class="vcard">
+        <div class="tiny">Ratio 5</div>
+        <input id="r5" type="number" step="0.001" value="2.0">
+        <div class="smallrow"><label>Pan</label><input id="pan5" type="range" min="-1" max="1" step="0.01" value="0.8"><span class="mono" id="pan5v">0.80</span></div>
+        <div class="smallrow"><label>Level</label><input id="lvl5" type="range" min="0" max="1" step="0.01" value="0.16"><span class="mono" id="lvl5v">0.16</span></div>
+        <label class="tiny"><input id="m5" type="checkbox"> Mute</label>
+        <div class="vu"><div id="vu5" class="bar" style="background:#fde68a"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fmt = (n, d=2) => isFinite(n) ? Number(n).toFixed(d) : "—";
+
+  let ctx, analyser, raf;
+  let master, gateGain, oscillators=[], pans=[], gains=[], vuBars;
+  let started = false, lastBase=0;
+
+  const rI = [ $('r1'), $('r2'), $('r3'), $('r4'), $('r5') ];
+  const pI = [ $('pan1'), $('pan2'), $('pan3'), $('pan4'), $('pan5') ];
+  const lI = [ $('lvl1'), $('lvl2'), $('lvl3'), $('lvl4'), $('lvl5') ];
+  const mI = [ $('m1'), $('m2'), $('m3'), $('m4'), $('m5') ];
+  const pV = [ $('pan1v'), $('pan2v'), $('pan3v'), $('pan4v'), $('pan5v') ];
+  const lV = [ $('lvl1v'), $('lvl2v'), $('lvl3v'), $('lvl4v'), $('lvl5v') ];
+  vuBars = [ $('vu1'), $('vu2'), $('vu3'), $('vu4'), $('vu5') ];
+
+  function setPan(i, v){ if (!pans[i]) return; try{ pans[i].pan.setTargetAtTime(v, ctx.currentTime, 0.01); }catch{ pans[i].pan.value=v; } }
+  function setLevel(i, v){ if (!gains[i]) return; const t = mI[i].checked ? 0 : v; try{ gains[i].gain.setTargetAtTime(t, ctx.currentTime, 0.02);}catch{gains[i].gain.value=t;} if(vuBars[i]) vuBars[i].style.width = Math.round(t*100)+'%'; }
+
+  pI.forEach((el,i)=> el.oninput = e => { const v=Number(e.target.value); pV[i].textContent=v.toFixed(2); setPan(i,v); });
+  lI.forEach((el,i)=> el.oninput = e => { const v=Number(e.target.value); lV[i].textContent=v.toFixed(2); setLevel(i,v); });
+  mI.forEach((el,i)=> el.oninput = () => setLevel(i, Number(lI[i].value)) );
+
+  function setGate(open){
+    const now = ctx.currentTime;
+    const a = Number($('attack').value)/1000, r = Number($('release').value)/1000;
+    gateGain.gain.cancelScheduledValues(now);
+    gateGain.gain.setValueAtTime(gateGain.gain.value, now);
+    gateGain.gain.linearRampToValueAtTime(open?1:0, now + (open?a:r));
+  }
+
+  function detectPitchACF(buf, sr){
+    const N = buf.length;
+    let rms=0; for(let i=0;i<N;i++){const v=buf[i]; rms+=v*v;} rms=Math.sqrt(rms/N);
+    if (rms < Number($('gate').value)) return {freq:0, rms};
+    const corr = new Float32Array(N);
+    for (let lag=0; lag<N; lag++){ let s=0; for (let i=0;i<N-lag;i++) s+=buf[i]*buf[i+lag]; corr[lag]=s; }
+    let d=0; while(d<N-1 && corr[d]>corr[d+1]) d++;
+    let pk=-1,k=-1; for (let i=d;i<N-1;i++){ if(corr[i]>pk){ pk=corr[i]; k=i; } }
+    if (k<=0) return {freq:0, rms};
+    const y1=corr[k-1], y2=corr[k], y3=corr[k+1]||corr[k];
+    const den=(y1-2*y2+y3); const shift=den?0.5*(y1-y3)/den:0;
+    const lag=k+shift; return {freq: sr/lag, rms};
+  }
+
+  let smoothHz=0;
+  function smooth(v){ const a=Number($('smooth').value); if(!smoothHz) smoothHz=v; smoothHz=a*smoothHz+(1-a)*v; return smoothHz; }
+  function clamp(base){
+    const m=$('octClamp').value; if(m==='none'||base<=0) return base;
+    let lo=50,hi=2e4; if(m==='low'){lo=100;hi=400;} else if(m==='mid'){lo=200;hi=800;} else {lo=400;hi=1600;}
+    while(base>hi) base/=2; while(base>0 && base<lo) base*=2; return base;
+  }
+
+  async function start(){
+    if(started) return; started=true;
+    $('status').textContent='starting…';
+    ctx = new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+    const mic = ctx.createMediaStreamSource(stream);
+
+    analyser = ctx.createAnalyser(); analyser.fftSize=2048; analyser.smoothingTimeConstant=0;
+    mic.connect(analyser);
+
+    master = ctx.createGain(); master.gain.value = Number($('gain').value);
+    gateGain = ctx.createGain(); gateGain.gain.value = 0;
+    gateGain.connect(master).connect(ctx.destination);
+
+    for(let i=0;i<5;i++){
+      const osc=ctx.createOscillator(); osc.type='sine';
+      const g=ctx.createGain(); g.gain.value=Number(lI[i].value);
+      const p=new StereoPannerNode(ctx,{pan:Number(pI[i].value)});
+      osc.connect(g).connect(p).connect(gateGain); osc.start();
+      oscillators.push(osc); gains.push(g); pans.push(p);
+      setPan(i, Number(pI[i].value));
+      setLevel(i, Number(lI[i].value));
+    }
+
+    const buf = new Float32Array(analyser.fftSize);
+    $('status').textContent='running';
+
+    function tick(){
+      analyser.getFloatTimeDomainData(buf);
+      const {freq, rms} = detectPitchACF(buf, ctx.sampleRate);
+      setGate(rms >= Number($('gate').value));
+
+      let base = (freq>0 && isFinite(freq)) ? smooth(freq) : 0;
+      if (base>0) lastBase = base;
+      if (base<=0 && $('hold').checked && lastBase>0) base = lastBase;
+
+      base = clamp(base);
+      const semi = Number($('transpose').value);
+      base = base>0 ? base*Math.pow(2, semi/12) : 0;
+
+      if (base>0){
+        $('nofreq').textContent='';
+        const ratios = rI.map(x=>Number(x.value));
+        oscillators.forEach((osc,i)=>{
+          const f = Math.max(10, Math.min(20000, base*ratios[i]));
+          try{ osc.frequency.setTargetAtTime(f, ctx.currentTime, 0.02);}catch{osc.frequency.value=f;}
+          // keep gain aligned to mute/level
+          setLevel(i, Number(lI[i].value));
+        });
+        $('baseHz').textContent = fmt(base,2);
+      } else {
+        $('nofreq').textContent='(no pitch detected)';
+        vuBars.forEach(b=> b&&(b.style.width='0%'));
+        $('baseHz').textContent = '—';
+      }
+
+      raf = requestAnimationFrame(tick);
+    }
+    tick();
+
+    $('gain').oninput   = e => { master.gain.value = Number(e.target.value); $('gainVal').textContent = Number(e.target.value).toFixed(2); };
+    $('smooth').oninput = e => { $('smoothVal').textContent = Number(e.target.value).toFixed(2); };
+    $('gate').oninput   = e => { $('gateVal').textContent = Number(e.target.value).toFixed(3); };
+    $('attack').oninput = e => { $('attackVal').textContent = e.target.value; };
+    $('release').oninput= e => { $('releaseVal').textContent = e.target.value; };
+    $('transpose').oninput = e => { $('transposeVal').textContent = e.target.value; };
+  }
+
+  function stop(){ if(!started) return; started=false; cancelAnimationFrame(raf); try{oscillators.forEach(o=>o.stop())}catch{}; oscillators=[]; }
+  $('start').onclick=start; $('stop').onclick=stop;
+
+  // initial readouts
+  pV.forEach((s,i)=> s.textContent = Number(pI[i].value).toFixed(2));
+  lV.forEach((s,i)=> s.textContent = Number(lI[i].value).toFixed(2));
+})();
+</script>
+</html>
